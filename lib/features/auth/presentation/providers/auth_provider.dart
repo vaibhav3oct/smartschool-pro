@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -36,14 +37,34 @@ class AuthController extends StateNotifier<AuthState> {
   AuthController() : super(const AuthState());
 
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   bool get isAuthenticated => state.user != null;
 
+  /// Restores the currently signed-in Firebase session and fetches the
+  /// Firestore-backed user record for the authenticated user.
   Future<void> restoreSession() async {
     final currentUser = _auth.currentUser;
     if (currentUser == null) {
       state = const AuthState();
       return;
+    }
+
+    try {
+      final doc = await _firestore.collection('users').doc(currentUser.uid).get();
+      if (doc.exists && doc.data() != null) {
+        final user = AppUser.fromJson({
+          ...doc.data()!,
+          'id': currentUser.uid,
+          'email': currentUser.email ?? doc.data()?['email'] ?? '',
+          'fullName': currentUser.displayName ?? doc.data()?['fullName'] ?? '',
+        });
+
+        state = state.copyWith(user: user);
+        return;
+      }
+    } catch (_) {
+      // Fall back to a light user object if Firestore is unavailable.
     }
 
     state = state.copyWith(
@@ -54,6 +75,7 @@ class AuthController extends StateNotifier<AuthState> {
     );
   }
 
+  /// Signs in with Firebase and stores the authenticated user's profile in state.
   Future<void> signIn({
     required String email,
     required String password,
@@ -71,6 +93,19 @@ class AuthController extends StateNotifier<AuthState> {
           code: 'user-not-found',
           message: 'No authenticated user found.',
         );
+      }
+
+      final doc = await _firestore.collection('users').doc(user.uid).get();
+      if (doc.exists && doc.data() != null) {
+        final profile = AppUser.fromJson({
+          ...doc.data()!,
+          'id': user.uid,
+          'email': user.email ?? doc.data()?['email'] ?? '',
+          'fullName': user.displayName ?? doc.data()?['fullName'] ?? '',
+        });
+
+        state = state.copyWith(isLoading: false, user: profile);
+        return;
       }
 
       state = state.copyWith(
@@ -94,6 +129,7 @@ class AuthController extends StateNotifier<AuthState> {
     }
   }
 
+  /// Creates a Firebase user and stores the Firestore user profile with role metadata.
   Future<void> signUp({
     required String fullName,
     required String email,
@@ -118,14 +154,22 @@ class AuthController extends StateNotifier<AuthState> {
 
       await user.updateDisplayName(fullName);
 
+      final profile = AppUser(
+        id: user.uid,
+        fullName: fullName,
+        email: email.trim(),
+        schoolId: schoolId,
+        role: role,
+        isActive: true,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      await _firestore.collection('users').doc(user.uid).set(profile.toJson());
+
       state = state.copyWith(
         isLoading: false,
-        user: AppUser.fromFirebaseUser(
-          user,
-          fullName: fullName,
-          role: role,
-          schoolId: schoolId,
-        ),
+        user: profile,
       );
     } on FirebaseAuthException catch (e) {
       state = state.copyWith(
